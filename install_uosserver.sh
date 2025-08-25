@@ -59,9 +59,25 @@ update_os() {
   apt upgrade -y
 }
 
+ensure_net_utils() {
+  # Ensure curl and wget exist for fetching scripts/assets
+  echo "[+] Ensuring curl and wget are installed…" >&2
+  apt install -y curl wget
+}
+
 install_podman() {
   echo "[+] Installing Podman…" >&2
-  apt install -y podman
+  if ! apt-get install -y podman; then
+    # Fallback for older Ubuntu (e.g., 20.04) where podman isn't in default repos
+    if [ -f /etc/os-release ]; then . /etc/os-release; fi
+    echo "[!] Podman not found in default repos. Attempting to enable upstream libcontainers repo…" >&2
+    echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${VERSION_ID:-22.04}/ /" \
+      | tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list >/dev/null
+    curl -fsSL "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${VERSION_ID:-22.04}/Release.key" \
+      | apt-key add - >/dev/null 2>&1 || true
+    apt update
+    apt install -y podman
+  fi
 }
 
 cleanup_autoremove() {
@@ -88,7 +104,7 @@ download_unifi() {
 
   echo "[+] Downloading UniFi OS Server:" >&2
   echo "    $UNIFI_URL" >&2
-  curl -fL -o "$file" "$UNIFI_URL"
+  curl -fsSL -o "$file" "$UNIFI_URL"
   chmod +x "$file"
 
   local new_md5
@@ -133,6 +149,7 @@ add_user_to_group() {
 # ===== Main =====
 echo "[i] Detected architecture: $ARCH" >&2
 update_os
+ensure_net_utils
 install_podman
 cleanup_autoremove
 unifi_file="$(download_unifi)"

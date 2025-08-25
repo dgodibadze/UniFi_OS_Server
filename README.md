@@ -1,23 +1,26 @@
-# UniFi OS Server Installer
+# UniFi OS Server Installer (Universal)
 
-This repository provides unattended installer scripts for deploying **UniFi OS Server** on Ubuntu/Debian Linux.  
-Two variants are included:
+A single, unattended installer for **UniFi OS Server** on **Debian-based Linux** (e.g., **Ubuntu**, **Raspberry Pi OS**).  
+The script auto-detects the CPU architecture and installs the correct UniFi OS Server package:
 
-- **`install_arm64.sh`** → for Raspberry Pi and other ARM64 devices  
-- **`install_x64.sh`** → for standard Intel/AMD x86_64 servers and VMs  
+- **ARM64** (Raspberry Pi / ARM servers)
+- **x86_64** (Intel/AMD servers & VMs)
 
-Each script will:
-- Install Podman runtime  
-- Update and upgrade the OS (handled inside the script)  
-- Download and verify the UniFi OS Server binary (with checksum validation)  
-- Run the installer (auto-confirming prompts)  
-- Add the invoking user to the `uosserver` group  
+What the script does:
+- Updates and upgrades the OS
+- Installs Podman runtime
+- Downloads the correct UniFi OS Server binary for your architecture
+- Verifies integrity via MD5 checksum
+- Runs the installer **without prompts** (auto-confirm)
+- Adds the invoking user to the `uosserver` group
+
+> **Note:** macOS is **not supported**. This is intended for **Debian-based** distributions only.
 
 ---
 
 ## Usage
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/<YOUR-USERNAME>/unifi-os-installer.git
-   cd unifi-os-installer
+Clone this repository and run:
+
+```bash
+sudo ./install.sh

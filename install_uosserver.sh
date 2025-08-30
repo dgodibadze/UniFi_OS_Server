@@ -36,11 +36,9 @@ detect_os() {
   if [[ "$id" == "ubuntu" || "$id" == "debian" || "$like" =~ (ubuntu|debian) ]]; then
     echo "debian apt $id $version_id $major"; return
   fi
-
   if [[ "$id" == "fedora" ]]; then
     echo "fedora dnf $id $version_id $major"; return
   fi
-
   if [[ "$id" == "centos" || "$id" == "rocky" || "$id" == "almalinux" || "$id" == "rhel" || "$like" =~ (rhel|centos|fedora) ]]; then
     if command -v dnf >/dev/null 2>&1; then pkg="dnf"; else pkg="yum"; fi
     echo "rhel $pkg $id $version_id $major"; return
@@ -143,13 +141,21 @@ install_podman() {
     esac
   fi
 
-  # --- Extra helpers for rootless networking/storage on RHEL/Fedora family ---
+  # Extra helpers for rootless networking/storage on RHEL/Fedora family — only if missing
   if [[ "$OS_FAMILY" == "rhel" || "$OS_FAMILY" == "fedora" ]]; then
-    echo "[+] Installing slirp4netns and fuse-overlayfs (rootless support)…" >&2
-    case "$PKG_MGR" in
-      dnf) dnf install -y slirp4netns fuse-overlayfs || true ;;
-      yum) yum install -y slirp4netns fuse-overlayfs || true ;;
-    esac
+    echo "[+] Ensuring slirp4netns and fuse-overlayfs (rootless support) are present…" >&2
+    if ! command -v slirp4netns >/dev/null 2>&1; then
+      case "$PKG_MGR" in
+        dnf) dnf install -y slirp4netns || true ;;
+        yum) yum install -y slirp4netns || true ;;
+      esac
+    fi
+    if ! command -v fuse-overlayfs >/dev/null 2>&1; then
+      case "$PKG_MGR" in
+        dnf) dnf install -y fuse-overlayfs || true ;;
+        yum) yum install -y fuse-overlayfs || true ;;
+      esac
+    fi
   fi
 }
 
@@ -160,6 +166,20 @@ cleanup_autoremove() {
     dnf) dnf -y autoremove || true; dnf -y clean all || true ;;
     yum) yum -y clean all || true ;;
   esac
+}
+
+# ----- Version helpers -----
+extract_target_version() {
+  # Pulls first x.y.z from the URL (e.g., 4.2.23)
+  printf '%s\n' "$UNIFI_URL" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
+}
+
+detect_installed_version() {
+  if command -v uosserver >/dev/null 2>&1; then
+    (uosserver version 2>/dev/null || true) | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 && return 0
+    (uosserver --version 2>/dev/null || true) | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 && return 0
+  fi
+  echo ""
 }
 
 download_unifi() {
@@ -196,8 +216,30 @@ download_unifi() {
 
 run_installer() {
   local file="$1"
+  local target_ver installed_ver
+  target_ver="$(extract_target_version)"
+  installed_ver="$(detect_installed_version || true)"
+
+  if [[ -n "$installed_ver" && -n "$target_ver" && "$installed_ver" == "$target_ver" ]]; then
+    echo "[i] UniFi OS Server $installed_ver already installed. Skipping installer." >&2
+    return 0
+  fi
+
   echo "[+] Running UniFi OS Server installer (auto-confirm)…" >&2
-  yes y | "$file" install
+  # Run installer but treat "same as installed" as success; never hang the script.
+  set +e
+  local out
+  out="$(yes y | "$file" install 2>&1)"; local rc=$?
+  set -e
+  if (( rc != 0 )); then
+    if printf '%s' "$out" | grep -qi 'same as installed'; then
+      echo "[i] Installer reports same version already installed; continuing." >&2
+      return 0
+    fi
+    echo "$out" >&2
+    echo "[x] Installer failed (rc=$rc)." >&2
+    exit $rc
+  fi
 }
 
 add_user_to_group() {
@@ -222,6 +264,54 @@ add_user_to_group() {
   echo "[+] Added. User must log out/in (or reboot) for membership to apply." >&2
 }
 
+# ----- Firewall offer (ask, then insert IPv4 rules at the top only) -----
+offer_open_firewall() {
+  echo
+  echo "[?] Open UniFi firewall ports on all interfaces (IPv4 only)?"
+  echo "    UDP: 3478"
+  echo "    TCP: 5005, 5514, 6789, 8080, 8444, 8880, 8881, 8882, 9543, 10003, 11443"
+  read -r -p "Proceed? [y/N]: " ans
+  [[ "$ans" =~ ^[Yy]$ ]] || { echo "[i] Skipping firewall changes."; return; }
+
+  local UDP_PORTS=(3478)
+  local TCP_PORTS=(5005 5514 6789 8080 8444 8880 8881 8882 9543 10003 11443)
+
+  if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+    echo "[+] firewalld detected: adding high-priority rich rules (IPv4 only)..." >&2
+    for p in "${UDP_PORTS[@]}"; do
+      firewall-cmd --permanent --add-rich-rule="rule priority='-100' family='ipv4' port port='${p}' protocol='udp' accept" >/dev/null
+    done
+    for p in "${TCP_PORTS[@]}"; do
+      firewall-cmd --permanent --add-rich-rule="rule priority='-100' family='ipv4' port port='${p}' protocol='tcp' accept" >/devnull
+    done
+    firewall-cmd --reload >/dev/null
+    echo "[+] firewalld rules added and reloaded." >&2
+    return
+  fi
+
+  if command -v ufw >/dev/null 2>&1; then
+    echo "[+] ufw detected: inserting IPv4 rules at top..." >&2
+    for p in "${UDP_PORTS[@]}"; do
+      ufw insert 1 allow proto udp to any port "${p}" || true
+    done
+    for p in "${TCP_PORTS[@]}"; do
+      ufw insert 1 allow proto tcp to any port "${p}" || true
+    done
+    echo "[i] ufw rules inserted. (Note: ufw must be enabled to take effect: 'ufw enable')" >&2
+    return
+  fi
+
+  # Fallback: iptables (non-persistent unless your system saves rules)
+  if command -v iptables >/dev/null 2>&1; then
+    echo "[+] iptables detected: inserting IPv4 ACCEPT rules at top..." >&2
+    for p in "${UDP_PORTS[@]}"; do iptables -I INPUT 1 -p udp --dport "${p}" -j ACCEPT || true; done
+    for p in "${TCP_PORTS[@]}"; do iptables -I INPUT 1 -p tcp --dport "${p}" -j ACCEPT || true; done
+    echo "[i] If using iptables directly, ensure rules are persisted by your distro's mechanism." >&2
+  else
+    echo "[!] No supported firewall manager detected; skipping." >&2
+  fi
+}
+
 # ===== Main =====
 update_os
 ensure_net_utils
@@ -230,4 +320,5 @@ cleanup_autoremove
 unifi_file="$(download_unifi)"
 run_installer "$unifi_file"
 add_user_to_group
+offer_open_firewall
 echo "[+] UniFi OS Server installation complete." >&2

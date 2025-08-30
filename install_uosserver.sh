@@ -16,74 +16,150 @@ detect_arch() {
   printf '%s\n' "$arch"
 }
 
+# ===== Detect OS family / pkg manager =====
+detect_os() {
+  # Outputs: OS_FAMILY (debian|rhel|fedora), PKG_MGR (apt|dnf|yum), ID, VERSION_ID, MAJOR
+  local id version_id like major pkg
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    id="${ID:-}"
+    version_id="${VERSION_ID:-}"
+    like="${ID_LIKE:-}"
+  else
+    echo "[x] Cannot detect OS (missing /etc/os-release)." >&2
+    exit 1
+  fi
+
+  major="${version_id%%.*}"
+
+  if [[ "$id" == "ubuntu" || "$id" == "debian" || "$like" =~ (ubuntu|debian) ]]; then
+    echo "debian apt $id $version_id $major"; return
+  fi
+
+  if [[ "$id" == "fedora" ]]; then
+    echo "fedora dnf $id $version_id $major"; return
+  fi
+
+  if [[ "$id" == "centos" || "$id" == "rocky" || "$id" == "almalinux" || "$id" == "rhel" || "$like" =~ (rhel|centos|fedora) ]]; then
+    if command -v dnf >/dev/null 2>&1; then pkg="dnf"; else pkg="yum"; fi
+    echo "rhel $pkg $id $version_id $major"; return
+  fi
+
+  if command -v apt >/dev/null 2>&1; then echo "debian apt $id $version_id $major"; return; fi
+  if command -v dnf >/dev/null 2>&1; then echo "rhel dnf $id $version_id $major"; return; fi
+  if command -v yum >/dev/null 2>&1; then echo "rhel yum $id $version_id $major"; return; fi
+
+  echo "[x] Unsupported or unknown Linux distribution: ID=$id VERSION_ID=$version_id" >&2
+  exit 1
+}
+
 ARCH="$(detect_arch)"
+read -r OS_FAMILY PKG_MGR OS_ID OS_VERSION_ID OS_MAJOR <<<"$(detect_os)"
 WORKDIR="$(pwd)"
 
+echo "[i] Detected architecture: $ARCH" >&2
+echo "[i] Detected distro: $OS_ID $OS_VERSION_ID ($OS_FAMILY via $PKG_MGR)" >&2
+
 # ===== Per-arch defaults =====
-# ARM64 (Raspberry Pi / ARM servers)
 UNIFI_URL_ARM64_DEFAULT="https://fw-download.ubnt.com/data/unifi-os-server/f791-linux-arm64-4.2.23-59b2566d-15db-4831-81bf-d070a37a3717.23-arm64"
 MD5_ARM64_DEFAULT="f30706d128495781f1fb8af355eaaa78"
 
-# x86_64 (Intel/AMD)
 UNIFI_URL_AMD64_DEFAULT="https://fw-download.ubnt.com/data/unifi-os-server/8b93-linux-x64-4.2.23-158fa00b-6b2c-4cd8-94ea-e92bc4a81369.23-x64"
 MD5_AMD64_DEFAULT="d0242f7bd9ca40f119df0ba90e97d72b"
 
-# Allow overrides via env if needed
 UNIFI_URL_ARM64="${UNIFI_URL_ARM64:-$UNIFI_URL_ARM64_DEFAULT}"
 MD5_ARM64="${MD5_ARM64:-$MD5_ARM64_DEFAULT}"
 UNIFI_URL_AMD64="${UNIFI_URL_AMD64:-$UNIFI_URL_AMD64_DEFAULT}"
 MD5_AMD64="${MD5_AMD64:-$MD5_AMD64_DEFAULT}"
 
-# ===== Choose URL/MD5 for this host =====
 case "$ARCH" in
-  arm64)
-    UNIFI_URL="$UNIFI_URL_ARM64"
-    EXPECTED_MD5="$MD5_ARM64"
-    ;;
-  amd64)
-    UNIFI_URL="$UNIFI_URL_AMD64"
-    EXPECTED_MD5="$MD5_AMD64"
-    ;;
-  *)
-    echo "[x] Unsupported or unknown architecture: $ARCH" >&2
-    echo "    Supported: arm64, amd64" >&2
-    exit 1
-    ;;
+  arm64) UNIFI_URL="$UNIFI_URL_ARM64"; EXPECTED_MD5="$MD5_ARM64" ;;
+  amd64) UNIFI_URL="$UNIFI_URL_AMD64"; EXPECTED_MD5="$MD5_AMD64" ;;
+  *) echo "[x] Unsupported architecture: $ARCH (supported: arm64, amd64)" >&2; exit 1 ;;
 esac
 
-# ===== Tasks =====
+# ===== Tasks (OS-aware) =====
 update_os() {
   echo "[+] Updating OS packages…" >&2
-  export DEBIAN_FRONTEND=noninteractive
-  apt update
-  apt upgrade -y
+  case "$PKG_MGR" in
+    apt) export DEBIAN_FRONTEND=noninteractive; apt update; apt -y upgrade ;;
+    dnf) dnf -y upgrade --refresh || dnf -y upgrade ;;
+    yum) yum -y update ;;
+  esac
 }
 
 ensure_net_utils() {
-  # Ensure curl and wget exist for fetching scripts/assets
   echo "[+] Ensuring curl and wget are installed…" >&2
-  apt install -y curl wget
+  case "$PKG_MGR" in
+    apt) apt install -y curl wget ;;
+    dnf) dnf install -y curl wget ;;
+    yum) yum install -y curl wget ;;
+  esac
 }
 
 install_podman() {
   echo "[+] Installing Podman…" >&2
-  if ! apt-get install -y podman; then
-    # Fallback for older Ubuntu (e.g., 20.04) where podman isn't in default repos
-    if [ -f /etc/os-release ]; then . /etc/os-release; fi
-    echo "[!] Podman not found in default repos. Attempting to enable upstream libcontainers repo…" >&2
-    echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${VERSION_ID:-22.04}/ /" \
-      | tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list >/dev/null
-    curl -fsSL "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${VERSION_ID:-22.04}/Release.key" \
-      | apt-key add - >/dev/null 2>&1 || true
-    apt update
-    apt install -y podman
+  if case "$PKG_MGR" in
+       apt) apt-get install -y podman ;;
+       dnf) dnf install -y podman ;;
+       yum) yum install -y podman ;;
+     esac
+  then
+    :
+  else
+    echo "[!] Podman not in base repos; enabling upstream libcontainers…" >&2
+    case "$OS_FAMILY" in
+      debian)
+        . /etc/os-release || true
+        echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${OS_VERSION_ID:-22.04}/ /" \
+          | tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list >/dev/null
+        curl -fsSL "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${OS_VERSION_ID:-22.04}/Release.key" \
+          | apt-key add - >/dev/null 2>&1 || true
+        apt update
+        apt install -y podman
+        ;;
+      rhel|fedora)
+        local repo_path=""
+        if [[ "$OS_ID" == "fedora" ]]; then
+          repo_path="Fedora_${OS_MAJOR}"
+        else
+          case "$OS_MAJOR" in
+            7) repo_path="CentOS_7" ;;
+            8) repo_path="CentOS_8_Stream" ;;
+            9) repo_path="CentOS_9_Stream" ;;
+            *) repo_path="CentOS_9_Stream" ;;
+          esac
+        fi
+        local repo_url="https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/${repo_path}/devel:kubic:libcontainers:stable.repo"
+        echo "[i] Adding libcontainers repo: $repo_url" >&2
+        curl -fsSL "$repo_url" -o /etc/yum.repos.d/devel:kubic:libcontainers:stable.repo
+        case "$PKG_MGR" in
+          dnf) dnf clean all; dnf -y makecache; dnf install -y podman ;;
+          yum) yum clean all; yum -y makecache; yum install -y podman ;;
+        esac
+        ;;
+      *) echo "[x] Unsupported OS family for Podman fallback: $OS_FAMILY" >&2; exit 1 ;;
+    esac
+  fi
+
+  # --- Extra helpers for rootless networking/storage on RHEL/Fedora family ---
+  if [[ "$OS_FAMILY" == "rhel" || "$OS_FAMILY" == "fedora" ]]; then
+    echo "[+] Installing slirp4netns and fuse-overlayfs (rootless support)…" >&2
+    case "$PKG_MGR" in
+      dnf) dnf install -y slirp4netns fuse-overlayfs || true ;;
+      yum) yum install -y slirp4netns fuse-overlayfs || true ;;
+    esac
   fi
 }
 
 cleanup_autoremove() {
   echo "[+] Cleaning up unused packages…" >&2
-  apt autoremove -y || true
-  apt autoclean -y || true
+  case "$PKG_MGR" in
+    apt) apt -y autoremove || true; apt -y autoclean || true ;;
+    dnf) dnf -y autoremove || true; dnf -y clean all || true ;;
+    yum) yum -y clean all || true ;;
+  esac
 }
 
 download_unifi() {
@@ -147,7 +223,6 @@ add_user_to_group() {
 }
 
 # ===== Main =====
-echo "[i] Detected architecture: $ARCH" >&2
 update_os
 ensure_net_utils
 install_podman

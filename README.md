@@ -1,109 +1,43 @@
-# UniFi OS Server Installer (Universal)
+# UniFi OS Server Installer
 
-A single, unattended installer for **UniFi OS Server** on **Debian-based Linux** (e.g., **Ubuntu**, **Raspberry Pi OS**).  
-The script auto-detects CPU architecture and installs the correct package for:
-
-- **ARM64** → Raspberry Pi / ARM servers  
-- **x86_64** → Intel/AMD servers & VMs  
+This repository provides a modular, cross-distro installation workflow for **UniFi OS Server** on Debian/Ubuntu, Fedora, CentOS, Rocky Linux, AlmaLinux, and similar distributions.  
+It supports both **arm64** (e.g. Raspberry Pi) and **amd64/x86_64** architectures.
 
 ---
 
-## What the script does
-- Updates & upgrades the OS  
-- Installs Podman  
-- Downloads the correct UniFi OS Server binary  
-- Verifies integrity via MD5 checksum  
-- Runs the installer **without prompts** (auto-confirm)  
-- Adds the invoking user to the `uosserver` group  
+## Structure
 
-> ⚠️ macOS is **not supported**. This installer is intended for **Debian-based distros** only.  
+The installation is split into three modular scripts:
 
----
+1. **`00-deps.sh`**  
+   - Detects OS family and package manager.  
+   - Updates OS and installs required dependencies (`curl`, `wget`, `podman`).  
+   - On Fedora/RHEL: ensures `slirp4netns` and `fuse-overlayfs` are present.  
+   - Chains into `10-install-uos.sh`.
 
-## Installation Methods (pick ONE)
+2. **`10-install-uos.sh`**  
+   - Detects system architecture.  
+   - Downloads the appropriate UniFi OS Server binary (arm64 or amd64).  
+   - Verifies the download via **MD5 checksum**.  
+   - Uses `pv` (if installed) for a throttled progress bar (1s refresh).  
+   - Skips installation if the same version is already installed.  
+   - Adds the invoking user to the `uosserver` group.  
+   - Chains into `20-firewall-uos.sh`.
 
-### 1) One-liner (recommended, uses your domain shortcut)
-```bash
-curl -fsSL https://davidgodibadze.com/uos | sudo bash
-```
-
-### 2) One-liner with `wget` (if `curl` is missing)
-```bash
-wget -qO- https://davidgodibadze.com/uos | sudo bash
-```
-
-### 3) Direct from GitHub Raw (fallback if domain is unavailable)
-```bash
-curl -fsSL https://raw.githubusercontent.com/dgodibadze/UniFi_OS_Server/main/install_uosserver.sh | sudo bash
-# or
-wget -qO-  https://raw.githubusercontent.com/dgodibadze/UniFi_OS_Server/main/install_uosserver.sh | sudo bash
-```
-
-### 4) Download script locally, then run
-```bash
-wget https://raw.githubusercontent.com/dgodibadze/UniFi_OS_Server/main/install_uosserver.sh -O install_uosserver.sh
-sudo bash install_uosserver.sh
-```
-
-### 5) Git clone (works even if curl/wget are missing but git is installed)
-```bash
-git clone https://github.com/dgodibadze/UniFi_OS_Server.git
-cd UniFi_OS_Server
-sudo bash install_uosserver.sh
-```
-
-> ℹ️ If you truly have none of `curl`, `wget`, or `git`, install one first:
-> ```bash
-> sudo apt update && sudo apt install -y curl
-> ```
-> then use Method #1.  
+3. **`20-firewall-uos.sh`**  
+   - Asks the user whether to open UniFi OS Server ports.  
+   - If confirmed, adds **IPv4-only** rules at the top of the firewall stack using:  
+     - `firewalld` (rich rules, priority -100)  
+     - `ufw` (insert at rule 1)  
+     - `iptables` (insert at INPUT 1)  
+   - Ports opened:  
+     - UDP: `3478`  
+     - TCP: `5005, 5514, 6789, 8080, 8444, 8880, 8881, 8882, 9543, 10003, 11443`
 
 ---
 
-## Post-installation
+## Usage
 
-- Your user is automatically added to the `uosserver` group.  
-- You must **log out and back in** (or reboot) for group changes to apply.  
-
-Verify membership:
+### One-liner (using curl)
 ```bash
-id <your-username>
-# look for ... groups=...,<gid>(uosserver)
-```
-
----
-
-## Troubleshooting
-
-- **APT lock held / unattended-upgrades running**  
-  If you see:
-  ```
-  Could not get lock /var/lib/dpkg/lock-frontend
-  ```
-  it means background updates are running.  
-  Wait a few minutes and re-run, or stop the service:
-  ```bash
-  sudo systemctl stop unattended-upgrades
-  sudo dpkg --configure -a
-  ```
-
-- **Podman not found (Ubuntu 20.04 or older)**  
-  Podman may not be in default repos. Either:
-  - Upgrade to **Ubuntu 22.04+**, or  
-  - Enable the official Podman repository before running the installer.  
-
----
-
-## Notes
-
-- Supported architectures: **arm64**, **amd64**  
-- Tested on: **Ubuntu Server**, **Raspberry Pi OS (Debian-based)**  
-- You can override the download URLs/MD5 manually with env vars:
-  ```bash
-  sudo UNIFI_URL_ARM64="<url>" MD5_ARM64="<md5>"        UNIFI_URL_AMD64="<url>" MD5_AMD64="<md5>"        bash -c "$(curl -fsSL https://davidgodibadze.com/uos)"
-  ```
-
----
-
-## License
-MIT — use at your own risk.
+curl -fsSL https://yourdomain.com/uos | sudo bash

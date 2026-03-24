@@ -1,22 +1,29 @@
 # UniFi OS Server Installer (Universal)
 
-A single, unattended installer for **UniFi OS Server** on **Debian-based Linux** (e.g., **Ubuntu**, **Raspberry Pi OS**).  
-The script auto-detects CPU architecture and installs the correct package for:
+A single, unattended installer for **UniFi OS Server** on **any major Linux distribution**.
+The script auto-detects your package manager and CPU architecture:
 
-- **ARM64** → Raspberry Pi / ARM servers  
-- **x86_64** → Intel/AMD servers & VMs  
+**Supported distros:**
+- **Debian / Ubuntu / Raspberry Pi OS** (apt)
+- **RHEL / Fedora / CentOS / Rocky / Alma** (dnf/yum)
+- **Arch Linux / Manjaro** (pacman)
+- **openSUSE** (zypper)
+
+**Supported architectures:**
+- **ARM64** → Raspberry Pi / ARM servers
+- **x86_64** → Intel/AMD servers & VMs
 
 ---
 
 ## What the script does
-- Updates & upgrades the OS  
-- Installs Podman  
-- Downloads the correct UniFi OS Server binary  
-- Verifies integrity via MD5 checksum  
-- Runs the installer **without prompts** (auto-confirm)  
-- Adds the invoking user to the `uosserver` group  
+- Updates & upgrades the OS
+- Installs dependencies (curl, wget, Podman)
+- Downloads the correct UniFi OS Server binary
+- Verifies integrity via MD5 checksum
+- Runs the installer **without prompts** (auto-confirm)
+- Adds the invoking user to the `uosserver` group
 
-> ⚠️ macOS is **not supported**. This installer is intended for **Debian-based distros** only.  
+> ⚠️ macOS and Windows are **not supported**. This installer is for **Linux only**.  
 
 ---
 
@@ -87,17 +94,18 @@ id <your-username>
   sudo dpkg --configure -a
   ```
 
-- **Podman not found (Ubuntu 20.04 or older)**  
-  Podman may not be in default repos. Either:
-  - Upgrade to **Ubuntu 22.04+**, or  
-  - Enable the official Podman repository before running the installer.  
+- **Podman not found**
+  On older Ubuntu (20.04), Podman may not be in default repos — the script will
+  attempt to add the upstream libcontainers repository automatically.
+  On other distros, ensure your repos are up to date.  
 
 ---
 
 ## Notes
 
-- Supported architectures: **arm64**, **amd64**  
-- Tested on: **Ubuntu Server**, **Raspberry Pi OS (Debian-based)**  
+- Supported architectures: **arm64**, **amd64**
+- Supported package managers: **apt**, **dnf**, **yum**, **pacman**, **zypper**
+- Tested on: **Ubuntu Server**, **Raspberry Pi OS**, **Fedora**, **Arch Linux**  
 - You can override the download URLs/MD5 manually with env vars:
   ```bash
   sudo UNIFI_URL_ARM64="<url>" MD5_ARM64="<md5>"        UNIFI_URL_AMD64="<url>" MD5_AMD64="<md5>"        bash -c "$(curl -fsSL https://davidgodibadze.com/uos)"

@@ -1,89 +1,155 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ===== Detect architecture (Debian/Ubuntu naming) =====
+# ===== UniFi OS Server — Universal Linux Installer =====
+# Supports: Debian/Ubuntu, RHEL/Fedora/CentOS, Arch, openSUSE
+# Architectures: ARM64, AMD64
+
+# ===== Detect architecture =====
 detect_arch() {
-  local arch=""
-  if command -v dpkg >/dev/null 2>&1; then
-    arch="$(dpkg --print-architecture)"
+  case "$(uname -m)" in
+    aarch64) printf 'arm64\n' ;;
+    x86_64)  printf 'amd64\n' ;;
+    *)
+      echo "[x] Unsupported architecture: $(uname -m)" >&2
+      echo "    Supported: arm64 (aarch64), amd64 (x86_64)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+# ===== Detect package manager =====
+detect_pkg_manager() {
+  if command -v apt-get >/dev/null 2>&1; then
+    printf 'apt\n'
+  elif command -v dnf >/dev/null 2>&1; then
+    printf 'dnf\n'
+  elif command -v yum >/dev/null 2>&1; then
+    printf 'yum\n'
+  elif command -v pacman >/dev/null 2>&1; then
+    printf 'pacman\n'
+  elif command -v zypper >/dev/null 2>&1; then
+    printf 'zypper\n'
   else
-    case "$(uname -m)" in
-      aarch64) arch="arm64" ;;
-      x86_64)  arch="amd64" ;;
-      *) arch="$(uname -m)" ;;
-    esac
+    echo "[x] No supported package manager found." >&2
+    echo "    Supported: apt, dnf, yum, pacman, zypper" >&2
+    exit 1
   fi
-  printf '%s\n' "$arch"
 }
 
 ARCH="$(detect_arch)"
+PKG_MGR="$(detect_pkg_manager)"
 WORKDIR="$(pwd)"
 
-# ===== Per-arch defaults =====
-# ARM64 (Raspberry Pi / ARM servers)
+# ===== Per-arch download URLs and checksums (v5.0.6) =====
 UNIFI_URL_ARM64_DEFAULT="https://fw-download.ubnt.com/data/unifi-os-server/df5b-linux-arm64-5.0.6-f35e944c-f4b6-4190-93a8-be61b96c58f4.6-arm64"
 MD5_ARM64_DEFAULT="ebf8b6d9d0f12ab40ade1df88017ddbc"
 
-# x86_64 (Intel/AMD)
 UNIFI_URL_AMD64_DEFAULT="https://fw-download.ubnt.com/data/unifi-os-server/1856-linux-x64-5.0.6-33f4990f-6c68-4e72-9d9c-477496c22450.6-x64"
 MD5_AMD64_DEFAULT="610b385c834bad7c4db00c29e2b8a9f1"
 
-# Allow overrides via env if needed
+# Allow overrides via environment variables
 UNIFI_URL_ARM64="${UNIFI_URL_ARM64:-$UNIFI_URL_ARM64_DEFAULT}"
 MD5_ARM64="${MD5_ARM64:-$MD5_ARM64_DEFAULT}"
 UNIFI_URL_AMD64="${UNIFI_URL_AMD64:-$UNIFI_URL_AMD64_DEFAULT}"
 MD5_AMD64="${MD5_AMD64:-$MD5_AMD64_DEFAULT}"
 
-# ===== Choose URL/MD5 for this host =====
 case "$ARCH" in
-  arm64)
-    UNIFI_URL="$UNIFI_URL_ARM64"
-    EXPECTED_MD5="$MD5_ARM64"
-    ;;
-  amd64)
-    UNIFI_URL="$UNIFI_URL_AMD64"
-    EXPECTED_MD5="$MD5_AMD64"
-    ;;
-  *)
-    echo "[x] Unsupported or unknown architecture: $ARCH" >&2
-    echo "    Supported: arm64, amd64" >&2
-    exit 1
-    ;;
+  arm64) UNIFI_URL="$UNIFI_URL_ARM64"; EXPECTED_MD5="$MD5_ARM64" ;;
+  amd64) UNIFI_URL="$UNIFI_URL_AMD64"; EXPECTED_MD5="$MD5_AMD64" ;;
 esac
 
-# ===== Tasks =====
-update_os() {
-  echo "[+] Updating OS packages…" >&2
-  export DEBIAN_FRONTEND=noninteractive
-  apt update
-  apt upgrade -y
+# ===== Package manager helpers =====
+pkg_update() {
+  echo "[+] Updating package index…" >&2
+  case "$PKG_MGR" in
+    apt)     export DEBIAN_FRONTEND=noninteractive; apt-get update ;;
+    dnf)     dnf check-update || true ;;
+    yum)     yum check-update || true ;;
+    pacman)  pacman -Sy --noconfirm ;;
+    zypper)  zypper --non-interactive refresh ;;
+  esac
 }
 
-ensure_net_utils() {
-  # Ensure curl and wget exist for fetching scripts/assets
-  echo "[+] Ensuring curl and wget are installed…" >&2
-  apt install -y curl wget
+pkg_upgrade() {
+  echo "[+] Upgrading system packages…" >&2
+  case "$PKG_MGR" in
+    apt)     apt-get upgrade -y ;;
+    dnf)     dnf upgrade -y ;;
+    yum)     yum upgrade -y ;;
+    pacman)  pacman -Syu --noconfirm ;;
+    zypper)  zypper --non-interactive update ;;
+  esac
+}
+
+pkg_install() {
+  local pkg="$1"
+  echo "[+] Installing $pkg…" >&2
+  case "$PKG_MGR" in
+    apt)     apt-get install -y "$pkg" ;;
+    dnf)     dnf install -y "$pkg" ;;
+    yum)     yum install -y "$pkg" ;;
+    pacman)  pacman -S --noconfirm --needed "$pkg" ;;
+    zypper)  zypper --non-interactive install "$pkg" ;;
+  esac
+}
+
+# ===== Tasks =====
+update_system() {
+  pkg_update
+  pkg_upgrade
+}
+
+ensure_dependencies() {
+  for dep in curl wget; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+      pkg_install "$dep"
+    fi
+  done
 }
 
 install_podman() {
-  echo "[+] Installing Podman…" >&2
-  if ! apt-get install -y podman; then
-    # Fallback for older Ubuntu (e.g., 20.04) where podman isn't in default repos
-    if [ -f /etc/os-release ]; then . /etc/os-release; fi
-    echo "[!] Podman not found in default repos. Attempting to enable upstream libcontainers repo…" >&2
-    echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${VERSION_ID:-22.04}/ /" \
-      | tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list >/dev/null
-    curl -fsSL "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${VERSION_ID:-22.04}/Release.key" \
-      | apt-key add - >/dev/null 2>&1 || true
-    apt update
-    apt install -y podman
+  if command -v podman >/dev/null 2>&1; then
+    echo "[+] Podman is already installed: $(podman --version)" >&2
+    return
   fi
+
+  echo "[+] Installing Podman…" >&2
+  case "$PKG_MGR" in
+    apt)
+      if ! apt-get install -y podman 2>/dev/null; then
+        echo "[!] Podman not in default repos. Adding upstream libcontainers repo…" >&2
+        if [ -f /etc/os-release ]; then . /etc/os-release; fi
+        local version_id="${VERSION_ID:-22.04}"
+        echo "deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${version_id}/ /" \
+          | tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list >/dev/null
+        curl -fsSL "https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/xUbuntu_${version_id}/Release.key" \
+          | apt-key add - >/dev/null 2>&1 || true
+        apt-get update
+        apt-get install -y podman
+      fi
+      ;;
+    dnf|yum)
+      pkg_install podman
+      ;;
+    pacman)
+      pkg_install podman
+      ;;
+    zypper)
+      pkg_install podman
+      ;;
+  esac
 }
 
-cleanup_autoremove() {
+cleanup_packages() {
   echo "[+] Cleaning up unused packages…" >&2
-  apt autoremove -y || true
-  apt autoclean -y || true
+  case "$PKG_MGR" in
+    apt)     apt-get autoremove -y || true; apt-get autoclean -y || true ;;
+    dnf)     dnf autoremove -y || true ;;
+    yum)     yum autoremove -y || true ;;
+    pacman)  pacman -Sc --noconfirm || true ;;
+    zypper)  zypper --non-interactive clean ;;
+  esac
 }
 
 download_unifi() {
@@ -102,7 +168,7 @@ download_unifi() {
     fi
   fi
 
-  echo "[+] Downloading UniFi OS Server:" >&2
+  echo "[+] Downloading UniFi OS Server v5.0.6 ($ARCH):" >&2
   echo "    $UNIFI_URL" >&2
   curl -fsSL -o "$file" "$UNIFI_URL"
   chmod +x "$file"
@@ -147,12 +213,21 @@ add_user_to_group() {
 }
 
 # ===== Main =====
-echo "[i] Detected architecture: $ARCH" >&2
-update_os
-ensure_net_utils
+echo "========================================" >&2
+echo " UniFi OS Server — Universal Installer" >&2
+echo "========================================" >&2
+echo "[i] Architecture : $ARCH" >&2
+echo "[i] Package mgr  : $PKG_MGR" >&2
+echo "" >&2
+
+update_system
+ensure_dependencies
 install_podman
-cleanup_autoremove
+cleanup_packages
 unifi_file="$(download_unifi)"
 run_installer "$unifi_file"
 add_user_to_group
+
+echo "" >&2
 echo "[+] UniFi OS Server installation complete." >&2
+echo "[i] Log out and back in for group changes to take effect." >&2
